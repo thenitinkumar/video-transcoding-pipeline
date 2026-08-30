@@ -1,0 +1,80 @@
+services:
+
+  # ── Local PostgreSQL ──────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: video_pipeline
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── LocalStack (S3 + SQS + EventBridge) ──────────────────────────────────────
+  localstack:
+    image: localstack/localstack:3
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: s3,sqs,events
+      DEBUG: "0"
+    volumes:
+      - localstack_data:/var/lib/localstack
+      - ./scripts/localstack-init.sh:/etc/localstack/init/ready.d/init.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:4566/_localstack/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ── FastAPI Gateway ───────────────────────────────────────────────────────────
+  api:
+    build: ./api
+    ports:
+      - "8000:8000"
+    environment:
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_ENDPOINT_URL: http://localstack:4566
+      RAW_BUCKET: video-pipeline-raw
+      PROCESSED_BUCKET: video-pipeline-processed
+      SQS_QUEUE_URL: http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/video-pipeline-processing
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/video_pipeline
+      INTERNAL_API_KEY: local-dev-secret
+      DEBUG: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    restart: on-failure
+
+  # ── Transcoding Worker ────────────────────────────────────────────────────────
+  worker:
+    build: ./worker
+    environment:
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_ENDPOINT_URL: http://localstack:4566
+      RAW_BUCKET: video-pipeline-raw
+      PROCESSED_BUCKET: video-pipeline-processed
+      SQS_QUEUE_URL: http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/video-pipeline-processing
+      API_BASE_URL: http://api:8000
+      INTERNAL_API_KEY: local-dev-secret
+      TEMP_DIR: /tmp/transcoding
+    depends_on:
+      - api
+    restart: on-failure
+
+volumes:
+  postgres_data:
+  localstack_data:
